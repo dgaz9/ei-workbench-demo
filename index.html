@@ -870,6 +870,15 @@ body.settled .rise { transition-delay: 0s; transition-duration: 0s; }
 #ei-pages-demo .ei-pages-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 #ei-pages-demo a { color: var(--ink); font: 11.5px var(--mono); padding: 8px 4px; }
 #ei-pages-status { font: 11px/1.45 var(--mono); }
+.ei-psa-qc { border: 1px solid var(--rule); background: var(--paper-2); margin: 16px 0; padding: 12px 16px; font: 13px/1.5 var(--sans); overflow-wrap: anywhere; }
+.ei-psa-qc summary { cursor: pointer; font: 700 13px var(--mono); }
+.ei-psa-qc summary span { font: 11px var(--mono); color: var(--graphite); margin-left: 8px; }
+.ei-psa-qc a { color: var(--annot-blue); }
+.ei-psa-qc li { margin: 10px 0; }
+.ei-psa-qc li p { margin: 4px 0; }
+.ei-psa-qc .ei-psa-qc-warning { border-left: 3px solid var(--annot-amber); padding-left: 10px; }
+.ei-psa-qc .ei-psa-qc-info { border-left: 3px solid var(--rule); padding-left: 10px; }
+.ei-psa-qc .ei-psa-qc-sources { color: var(--graphite); font-size: 11px; }
 /* The highlight contract (Task 10/Task 3) painted onto white -- the
    theme-following --blue-wash above turns near-invisible in dark mode
    against a sheet that is always white, so the sheet gets its own fixed
@@ -3254,6 +3263,17 @@ body:not(.ei-has-project) .ei-overview-nav { display: none; }
       </div>
       <p id="ei-psa-recovery-note" hidden>Your draft stays in this window when you switch projects. Download it before closing or refreshing if saving is unavailable.</p>
     </div>
+    <details id="ei-psa-qc" class="ei-psa-qc">
+      <summary>PSA quality check <span>Before OIC review</span></summary>
+      <p>Check saved survey facts and the generated document before sending it for review. Unsaved edits are excluded. Findings support engineering judgment; they do not approve or sign the PSA.</p>
+      <div class="ov-actions">
+        <button type="button" class="fchip" id="ei-psa-qc-run">Check saved PSA</button>
+        <button type="button" class="fchip" id="ei-psa-qc-download" disabled>Download QC notes</button>
+      </div>
+      <p id="ei-psa-qc-status" role="status" aria-live="polite">Run the check after saving your survey and generating the document.</p>
+      <div id="ei-psa-qc-results" role="region" aria-label="PSA quality findings" tabindex="-1" hidden></div>
+      <p class="ei-psa-qc-sources"><a data-to href="#p-298">Documented 2002 PSA requirements</a> · <a href="https://static.e-publishing.af.mil/production/1/saf_cn/publication/dafh33-337/dafh33-337.pdf" target="_blank" rel="noopener noreferrer">Tongue and Quill</a></p>
+    </details>
     <div id="ei-psa-guided" aria-label="Guided interview"></div>
     <div id="ei-psa-form-wrap" hidden>
       <div class="ei-psa-lh-picker">
@@ -22343,6 +22363,396 @@ window.EI = window.EI || {};
     visibleQuestion: visibleQuestion
   };
 });
+
+/* Deterministic review prompts only: no writes, generation or approval decisions. */
+(function (root, factory) {
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = factory(require("./assist-core.js"), require("./psa-fill.js")); return;
+  }
+  root.EI = root.EI || {};
+  root.EI.psaQcModel = factory(root.EI.assistCore, root.EI.psaFill);
+})(typeof window !== "undefined" ? window : globalThis, function (C, F) {
+  "use strict";
+  var LIMITATION = "These are automated review prompts for the supplied saved facts. They do not replace the OIC checklist, technical review, signatures, certification or approval. A finding-free list is not a readiness decision.";
+  var SOURCES = {
+    "to-psa-scope": { title: "TO 00-33D-2002 Volume 2, 4.3.6", reference: "process/exports/EI-TO-Reference.html#p-298", status: "local-extracted-reference" },
+    "to-psa-distribution": { title: "TO 00-33D-2002 Volume 2, 4.3.6", reference: "process/exports/EI-TO-Reference.html#p-303", status: "local-extracted-reference" },
+    "tq-focus": { title: "The Tongue and Quill, Chapter 1 FOCUS", reference: "Official indexed Chapter 1, printed page 5; full current text not verified", url: "https://static.e-publishing.af.mil/production/1/saf_cn/publication/dafh33-337/dafh33-337.pdf", status: "official-index-only" },
+    "model-decision": { title: "Bundled PSA model and fill decisions", reference: "app/psa/model.json", status: "application-model" }
+  };
+  var has = function (value, key) { return Object.prototype.hasOwnProperty.call(value || {}, key); };
+  function blank(value) { return value === undefined || value === null || typeof value === "string" && value.trim() === ""; }
+  function inspect(options) {
+    options = options || {};
+    var findings = [], model = options.model, survey = options.survey, questions = [], indexed = Object.create(null);
+    var coverage = { survey: "unknown", requirements: "unknown", document: "unknown", generation: "unknown" };
+    function add(severity, code, label, detail, questionId, sourceIds) {
+      var finding = { severity: severity, code: code, label: label, detail: detail };
+      if (questionId) finding.questionId = questionId;
+      if (sourceIds) finding.sources = sourceIds.slice();
+      findings.push(finding);
+    }
+    if (!model || !Array.isArray(model.sections) || !model.sections.every(function (s) { return s && Array.isArray(s.questions); })) {
+      add("warning", "model-unavailable", "Survey rules unavailable", "Required-answer applicability could not be checked.");
+    } else {
+      model.sections.forEach(function (section) { section.questions.forEach(function (q) { questions.push(q); indexed[q.id] = q; }); });
+      var required = Object.create(null), review = Object.create(null);
+      questions.forEach(function (q) { if (q.required === true) required[q.id] = true; });
+      (options.requiredQuestionIds || []).forEach(function (id) {
+        if (typeof id !== "string" || !has(indexed, id)) {
+          add("warning", "requirement-unrecognized", "A requested answer check is unavailable", "The caller named a question absent from this model.");
+        } else required[id] = true;
+      });
+      (options.reviewQuestionIds || []).forEach(function (id) {
+        if (typeof id !== "string" || !has(indexed, id)) {
+          add("warning", "review-question-unrecognized", "A basic information check is unavailable", "The caller named a review question absent from this model.");
+        } else review[id] = true;
+      });
+      coverage.requirements = Object.keys(required).length ? "explicit-only" : "none-declared";
+      if (!Object.keys(required).length) add("info", "requirements-not-declared", "No required-answer policy supplied", "This model declares no required questions. Optional unanswered survey fields are not treated as blocking items.");
+      if (!survey || !survey.answers || typeof survey.answers !== "object" || Array.isArray(survey.answers)) {
+        add("warning", "survey-unavailable", "Saved survey unavailable", "No saved answer snapshot was supplied; missing answers cannot be distinguished from unread data.");
+      } else {
+        coverage.survey = "supplied";
+        var answers = survey.answers, values = F.values(model, answers, options.prefills || {}, options.extras || {});
+        questions.forEach(function (q) {
+          if ((!required[q.id] && !review[q.id]) || !C.visibleQuestion(model, answers, q)) return;
+          if (q.requires && (!indexed[q.requires] || !C.effectiveInclude(indexed[q.requires], answers))) return;
+          var value, isRequired = !!required[q.id];
+          var missingCode = isRequired ? "required-answer-missing" : "review-answer-open";
+          var reviewDetail = "Basic document information is not recorded; confirm applicability before OIC review.";
+          if (q.type === "include") return; // false is a complete, explicit/default decision.
+          if (q.type === "choice") {
+            value = has(answers, q.id) && answers[q.id] !== "" ? answers[q.id] : q.default;
+          } else if (q.type === "table") {
+            value = values["tbl:" + q.id];
+            var rows = Array.isArray(value) ? value.filter(function (row) {
+              return row && typeof row === "object" && (q.columns || []).some(function (column) { return !blank(row[column.id]); });
+            }) : [];
+            if (!rows.length) add("warning", missingCode, q.ask || q.id, isRequired ? "The applicable required table has no populated rows." : reviewDetail, q.id);
+            else {
+              var columns = (q.columns || []).filter(function (column) { return column.required === true; });
+              var incomplete = rows.some(function (row) { return columns.some(function (column) { return blank(row[column.id]); }); });
+              if (incomplete) add("warning", isRequired ? "required-table-cell-missing" : "review-answer-open", q.ask || q.id, isRequired ? "A populated row lacks a column explicitly marked required by the model." : reviewDetail, q.id);
+            }
+            return;
+          } else if (q.token) value = values[q.token];
+          else value = has(answers, q.id) && answers[q.id] !== "" ? answers[q.id] : F.prefill(q.prefill, options.prefills || {});
+          if (blank(value)) add("warning", missingCode, q.ask || q.id, isRequired ? "No effective answer or prefill was supplied for this applicable explicitly required question." : reviewDetail, q.id);
+        });
+        if (options.standardsReview === true) {
+          function effective(id) {
+            var q = indexed[id];
+            return q ? (q.token ? values[q.token] : (has(answers, id) && answers[id] !== "" ? answers[id] : F.prefill(q.prefill, options.prefills || {}))) : "";
+          }
+          function date(id) {
+            var q = indexed[id], raw = q && (has(answers, id) && !blank(answers[id]) ? answers[id] : F.prefill(q.prefill, options.prefills || {}));
+            if (typeof raw !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(raw)) return null;
+            var parsed = new Date(raw + "T00:00:00.000Z");
+            return !isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === raw ? raw : null;
+          }
+          var funding = indexed.funding_variant;
+          var chosen = funding && (has(answers, funding.id) && answers[funding.id] !== "" ? answers[funding.id] : funding.default);
+          if (chosen === "other" && indexed.funding_other && blank(effective("funding_other"))) {
+            add("warning", "funding-explanation-missing", "Other or split funding needs an explanation", "The selected funding branch uses the funding explanation, but its effective text is blank. Describe the intended split before human review.", "funding_other", ["model-decision"]);
+          }
+          var authorityDate = date("authority_date"), psaDate = date("psa_date");
+          if (authorityDate && psaDate && authorityDate > psaDate) {
+            add("warning", "authority-after-document-date", "Check authority and agreement dates", "The supplied authority date is later than the PSA date. Confirm that this sequence is intended; this is a chronology prompt, not a policy violation finding.", "authority_date", ["model-decision"]);
+          }
+        }
+      }
+    }
+    if (options.standardsReview === true) {
+      add("info", "human-clarity-review", "Review purpose, organization and clarity", "Use the Tongue and Quill FOCUS approach to review whether the purpose and subject are clear, the intended audience can follow the support commitments, and the document reads consistently. Meaning and sound engineering judgment require human review. Only the official index has been checked; current full-text compliance is not established.", null, ["tq-focus"]);
+      add("info", "human-psa-scope-review", "Review PSA scope and customer support commitments", "Compare the project information, equipment and siting, installation or removal work, and allied/customer support responsibilities with the actual agreed scope. The cited local TO extract is a review source, not evidence that this document complies.", null, ["to-psa-scope"]);
+      add("info", "human-distribution-review", "Review unsigned-draft distribution and endorsement plans", "Check the draft distribution estimate when the PSA is not signed on site and the applicable endorsement coordination suspense. An e-mail receipt acknowledgment date is a separate fact and must not be treated as the endorsement suspense. These plans require human confirmation.", null, ["to-psa-distribution"]);
+    }
+    var document = options.document;
+    if (document && document.state === "missing") {
+      coverage.document = "missing";
+      add("warning", "document-missing", "Generated document not supplied", "The caller confirmed that no generated document was available. Generate or locate the document before reviewing its contents.");
+    } else if (document && document.state === "available" && typeof document.text === "string") {
+      coverage.document = document.complete === true ? "complete-supplied-text" : "partial-supplied-text";
+      var seen = Object.create(null), re = /\{\{[^{}\r\n]{1,200}\}\}/g, match;
+      while ((match = re.exec(document.text))) {
+        if (!seen[match[0]]) {
+          seen[match[0]] = true;
+          add("warning", "unresolved-document-token", "Unfilled document marker", "The supplied generated document text still contains " + match[0] + ".");
+        }
+      }
+      var drafting = /\b(?:TBD|TODO)\b|\bINSERT\s+(?:HERE|TEXT|NAME|DATE|TITLE|PURPOSE)\b|\bINSERT\s*\.\.\./g;
+      var markerSeen = Object.create(null);
+      while ((match = drafting.exec(document.text))) {
+        if (!markerSeen[match[0]]) {
+          markerSeen[match[0]] = true;
+          add("warning", "document-drafting-marker", "Review a possible drafting placeholder", "The supplied document contains the literal drafting marker " + match[0] + ". Confirm its meaning and replace it if it is unfinished text; no change was made.");
+        }
+      }
+      if (document.complete !== true) add("info", "document-text-partial", "Document text check is partial", "Only supplied text was checked. Unexamined pages, headers, footers or truncated text may contain other issues.");
+    } else add("info", "document-unchecked", "Generated document text not checked", "Document contents were not supplied or could not be read; this does not mean the document is absent or complete.");
+    var generation = options.generation;
+    if (generation === null || generation && generation.state === "missing") {
+      coverage.generation = "missing";
+      add("warning", "generation-not-recorded", "Generation evidence not recorded", "The caller confirmed no generation evidence. This does not establish that no manually prepared document exists.");
+    } else if (generation && generation.state === "missing-file") {
+      coverage.generation = "missing-file";
+      add("warning", "generated-file-missing", "Recorded generated file is missing", "The generation record refers to a file the caller could not find.");
+    } else if (generation && generation.state === "ready" && generation.verification === "changed") {
+      coverage.generation = "changed";
+      add("warning", "generation-changed", "Generated document or its inputs changed", "The existing fingerprint inspection found a change. Review saved inputs and document contents before deciding whether to regenerate; preserve manual edits.");
+    } else if (generation && generation.state === "ready" && generation.verification === "verified") {
+      coverage.generation = "verified";
+      add("info", "generation-fingerprints-match", "Supplied generation fingerprints match", "The supplied inspection matched saved document and input fingerprints. Technical review and approval are not recorded by this check.");
+    } else if (generation && generation.state === "ready") {
+      coverage.generation = "incomplete";
+      add("warning", "generation-verification-incomplete", "Generation verification incomplete", "Not all saved-input or template fingerprints were available. Matching available evidence alone cannot establish freshness.");
+    } else if (generation && generation.state === "error") {
+      coverage.generation = "unreadable";
+      add("warning", "generation-evidence-unreadable", "Generation evidence could not be read", "Freshness is unknown; unreadable evidence must not be treated as absent or current.");
+    } else add("info", "generation-unchecked", "Generation freshness not checked", "No generation inspection was supplied. Freshness is unknown, not confirmed absent or current.");
+    return { findings: findings, coverage: coverage, limitation: LIMITATION };
+  }
+  return { inspect: inspect, LIMITATION: LIMITATION, SOURCES: SOURCES };
+});
+
+/* Saved-record review only. This module never writes project, survey or review state. */
+(function (EI) {
+  "use strict";
+  var initialized = false, epoch = 0, busy = false, retained = null;
+  var MAX_BASE64 = 16 * 1024 * 1024, MAX_EXPANDED = 24 * 1024 * 1024, MAX_TEXT = 4 * 1024 * 1024;
+  var runButton, downloadButton, status, results;
+  function element(id) { return document.getElementById(id); }
+  function current() { return EI.project && EI.project.current(); }
+  function eligible() { return !!(EI.env.hosted && current() && EI.router.current() === "psa"); }
+  function buttons() { runButton.disabled = busy || !eligible(); downloadButton.disabled = busy || !retained || !eligible(); }
+  function invalidate(message) {
+    epoch++; busy = false; retained = null;
+    results.hidden = true; results.textContent = "";
+    status.textContent = message || "Saved facts or this visit changed. Save your survey and run the check again. Your editor draft is retained.";
+    buttons();
+  }
+  function alive(ticket) { var p = current(); return ticket.epoch === epoch && eligible() && p.path === ticket.path; }
+  function boundedError(error) { return String(error && error.message || "The source could not be read.").slice(0, 240); }
+  function bytes(value) {
+    if (typeof value !== "string" || value.length > MAX_BASE64 || value.length % 4 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) throw new Error("Source bytes are unreadable or exceed the review size limit.");
+    var binary = atob(value), out = new Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+    return out;
+  }
+  function utf8(value) { return new TextDecoder("utf-8", { fatal: true }).decode(value); }
+  function read(path, name, validator) {
+    return Promise.resolve().then(function () { return EI.store.projectReadFile(path, name); }).then(function (found) {
+      var fact = { state: "available", bytes: found.bytes };
+      bytes(found.bytes);
+      if (validator) fact.record = validator(JSON.parse(utf8(bytes(found.bytes))));
+      return fact;
+    }).catch(function (error) {
+      return error && error.status === 404 ? { state: "missing" } : { state: "unavailable", error: boundedError(error) };
+    });
+  }
+  function projectRecord(record) {
+    if (!record || typeof record !== "object" || Array.isArray(record) || record.schema !== EI.SCHEMA) throw new Error("Saved project record has an unsupported schema.");
+    return record;
+  }
+  function surveyRecord(record) { return EI.surveyModel.validate(record); }
+  function validOutputPath(value) {
+    return typeof value === "string" && value.split("/").length === 2 && value.split("/")[0] === EI.SECTION_FOLDERS[1] && !/[\\]|(?:^|\/)\.\.(?:\/|$)/.test(value);
+  }
+  function inspectGeneration(path, survey, context) {
+    return Promise.resolve().then(function () { return EI.psaOutput.inspect(path, survey, context); }).catch(function (error) {
+      return { state: "error", message: boundedError(error) };
+    });
+  }
+  /* Workbench fills use stored ZIP entries. Refuse compressed/manual ZIPs here
+     rather than allowing an unbounded inflate; freshness inspection still runs. */
+  function safeZip(value) {
+    var data = bytes(value), view = new DataView(data.buffer), offset = 0, total = 0, entries = 0;
+    while (offset + 4 <= data.length && view.getUint32(offset, true) === 0x04034b50) {
+      if (offset + 30 > data.length) throw new Error("Document ZIP is truncated.");
+      var flags = view.getUint16(offset + 6, true), method = view.getUint16(offset + 8, true);
+      var compressed = view.getUint32(offset + 18, true), expanded = view.getUint32(offset + 22, true);
+      var names = view.getUint16(offset + 26, true), extra = view.getUint16(offset + 28, true);
+      if (flags & 9 || method !== 0 || compressed !== expanded) throw new Error("Compressed or encrypted document text is unsupported by this bounded reader. Review the Word file directly.");
+      total += expanded; entries++;
+      if (total > MAX_EXPANDED || entries > 1024 || offset + 30 + names + extra + compressed > data.length) throw new Error("Document ZIP exceeds review limits or is truncated.");
+      offset += 30 + names + extra + compressed;
+    }
+    if (!entries) throw new Error("Document ZIP contains no readable entries.");
+    return data;
+  }
+  function documentText(fact) {
+    if (!fact || fact.state !== "available") return Promise.resolve({ state: "unknown" });
+    return Promise.resolve().then(function () { return EI.psaFill.parseZip(safeZip(fact.bytes)); }).then(function (parts) {
+      var text = [], length = 0, foundBody = false;
+      parts.forEach(function (part) {
+        if (!/^word\/(?:document|header[0-9]+|footer[0-9]+)\.xml$/.test(part.name)) return;
+        if (part.name === "word/document.xml") foundBody = true;
+        if (part.data.length > MAX_TEXT) throw new Error("A document text part exceeds the review size limit.");
+        var xmlText = utf8(part.data);
+        if (/<!DOCTYPE|<!ENTITY/i.test(xmlText)) throw new Error("Document XML declarations are unsupported by the review reader.");
+        var xml = new DOMParser().parseFromString(xmlText, "application/xml");
+        if (xml.getElementsByTagName("parsererror").length) throw new Error("A document XML part could not be read.");
+        var ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+        var paragraphs = xml.getElementsByTagNameNS(ns, "p"), lines = [];
+        for (var i = 0; i < paragraphs.length; i++) lines.push(paragraphs[i].textContent);
+        var body = lines.join("\n"); length += body.length;
+        if (length > MAX_TEXT) throw new Error("Combined document text exceeds the review size limit.");
+        text.push(part.name + "\n" + body);
+      });
+      if (!foundBody) throw new Error("The document body is missing.");
+      return { state: "available", text: text.join("\n"), complete: false };
+    }).catch(function (error) { return { state: "unknown", error: boundedError(error) }; });
+  }
+  function contextFor(survey, project) {
+    return survey && project ? EI.psa.outputContext(survey, project) : null;
+  }
+  function capture(ticket) {
+    return Promise.all([read(ticket.path, "ei-project.json", projectRecord), read(ticket.path, "ei-survey.json", surveyRecord), read(ticket.path, EI.psaOutput.FILE)]).then(function (facts) {
+      var snapshot = { project: facts[0], survey: facts[1], manifest: facts[2] };
+      snapshot.context = contextFor(snapshot.survey.record, snapshot.project.record);
+      snapshot.contextKey = JSON.stringify(snapshot.context);
+      return inspectGeneration(ticket.path, snapshot.survey.record || null, snapshot.context).then(function (inspection) {
+        snapshot.generation = inspection; snapshot.generationKey = JSON.stringify(inspection);
+        var output = inspection && inspection.record && inspection.record.outputs && inspection.record.outputs.psa;
+        snapshot.docPath = output && validOutputPath(output.path) ? output.path : null;
+        return snapshot.docPath ? read(ticket.path, snapshot.docPath) : null;
+      }).then(function (doc) {
+        snapshot.doc = doc;
+        return documentText(doc).then(function (text) {
+          snapshot.document = text;
+          if (snapshot.generation.state === "missing-file") snapshot.document = { state: "missing" };
+          return snapshot;
+        });
+      });
+    });
+  }
+  function verify(ticket, snapshot) {
+    return Promise.all([read(ticket.path, "ei-project.json", projectRecord), read(ticket.path, "ei-survey.json", surveyRecord), read(ticket.path, EI.psaOutput.FILE), snapshot.docPath ? read(ticket.path, snapshot.docPath) : null]).then(function (facts) {
+      if (!alive(ticket) || JSON.stringify(facts[0]) !== JSON.stringify(snapshot.project) || JSON.stringify(facts[1]) !== JSON.stringify(snapshot.survey) || JSON.stringify(facts[2]) !== JSON.stringify(snapshot.manifest) || JSON.stringify(facts[3]) !== JSON.stringify(snapshot.doc)) return false;
+      var context = contextFor(facts[1].record, facts[0].record);
+      if (JSON.stringify(context) !== snapshot.contextKey) return false;
+      return inspectGeneration(ticket.path, facts[1].record || null, context).then(function (inspection) {
+        return alive(ticket) && JSON.stringify(inspection) === snapshot.generationKey && JSON.stringify(contextFor(facts[1].record, facts[0].record)) === snapshot.contextKey;
+      });
+    });
+  }
+  function append(parent, tag, text, className) {
+    var node = document.createElement(tag); node.textContent = text;
+    if (className) node.className = className;
+    parent.appendChild(node); return node;
+  }
+  function sourceLines() {
+    return Object.keys(EI.psaQcModel.SOURCES).map(function (id) {
+      var source = EI.psaQcModel.SOURCES[id];
+      return source.title + " · " + source.status + " · " + source.reference + (source.url ? " · " + source.url : "");
+    });
+  }
+  function coverageLines(coverage) {
+    var names = { survey: "Saved survey", requirements: "Required-answer checks", document: "Generated document text", generation: "Document freshness" };
+    var labels = { unknown: "not verified", supplied: "read", "explicit-only": "selected checks only", "none-declared": "no required-answer policy supplied",
+      missing: "not recorded", "missing-file": "recorded file not found", changed: "saved document or inputs changed", verified: "saved fingerprints match; engineering review still needed",
+      incomplete: "verification incomplete", unreadable: "could not be read", "complete-supplied-text": "supplied text checked", "partial-supplied-text": "partial text checked; review the Word file" };
+    return Object.keys(names).map(function (key) { return names[key] + ": " + (labels[coverage[key]] || "not verified"); });
+  }
+  function finding(result, code, label, detail) { result.findings.push({ severity: "warning", code: code, label: label, detail: detail }); }
+  function buildResult(snapshot) {
+    var context = snapshot.context, input = context && context.inputs || {};
+    var result = EI.psaQcModel.inspect({ model: window.EI_PSA.model, survey: snapshot.survey.record || null,
+      prefills: input.prefills || {}, extras: input.extras || {}, requiredQuestionIds: ["from_office"],
+      reviewQuestionIds: ["number", "title", "location", "customer_unit", "purpose", "authority", "engineer", "manager"],
+      standardsReview: true, document: snapshot.document, generation: snapshot.generation });
+    if (snapshot.project.state !== "available") finding(result, "saved-project-unavailable", "Saved project facts unavailable", snapshot.project.error || "The saved project record was not found; project prefills were not inferred from the open editor.");
+    if (snapshot.survey.state === "unavailable") finding(result, "saved-survey-unreadable", "Saved survey could not be read", snapshot.survey.error);
+    if (snapshot.manifest.state === "unavailable") finding(result, "generation-record-unreadable", "Generation record could not be read", snapshot.manifest.error);
+    if (snapshot.doc && snapshot.doc.state === "unavailable") finding(result, "document-unreadable", "Generated document could not be read", snapshot.doc.error);
+    if (snapshot.document.error) finding(result, "document-text-unavailable", "Generated document text could not be checked", snapshot.document.error);
+    return result;
+  }
+  function publish(ticket, snapshot) {
+    var result = buildResult(snapshot), at = new Date().toISOString(), project = snapshot.project.record || {};
+    var label = typeof project.number === "string" ? project.number : "Saved project identity unavailable";
+    var warnings = result.findings.filter(function (f) { return f.severity === "warning"; }).length;
+    var lines = ["PSA quality check working notes", "Project: " + label, "Snapshot check: " + at, "Saved facts only. Sources were re-read before display; this is not an atomic project snapshot.", result.limitation, ""];
+    var now = EI.psa.answersNow && EI.psa.answersNow();
+    var draft = now && now.path === ticket.path && JSON.stringify(now.answers) !== JSON.stringify(snapshot.survey.record && snapshot.survey.record.answers || {});
+    results.textContent = "";
+    append(results, "p", label + " · " + at + " · Saved facts only");
+    append(results, "p", warnings + " attention warning(s); " + (result.findings.length - warnings) + " information / human review prompt(s). No automated approval.");
+    if (draft) { append(results, "p", "Your local unsaved edits were excluded and remain in the editor."); lines.push("Local unsaved edits excluded; editor draft retained."); }
+    var list = document.createElement("ul"); results.appendChild(list);
+    var known = Object.create(null);
+    window.EI_PSA.model.sections.forEach(function (section) { section.questions.forEach(function (q) { known[q.id] = true; }); });
+    result.findings.forEach(function (f) {
+      var item = document.createElement("li"); item.setAttribute("data-qc-code", f.code);
+      if (f.questionId) item.setAttribute("data-qc-question", f.questionId);
+      item.className = "ei-psa-qc-" + (f.severity === "warning" ? "warning" : "info");
+      append(item, "strong", f.label); append(item, "p", f.detail);
+      if (f.questionId && known[f.questionId]) {
+        var button = append(item, "button", "Review this answer", "fchip"); button.type = "button";
+        button.addEventListener("click", function () {
+          invalidate("Review the answer, save any changes, then run the saved check again.");
+          Promise.resolve().then(function () { return EI.psa.openQuestion(f.questionId); }).catch(function (error) { status.textContent = "Could not open that answer. " + boundedError(error); });
+        });
+      }
+      list.appendChild(item); lines.push("[" + f.severity + "] " + f.code + ": " + f.label, f.detail);
+    });
+    coverageLines(result.coverage).forEach(function (line) { append(results, "p", line); });
+    append(results, "p", result.limitation);
+    append(results, "p", "Sources: documented 2002 material is a local extracted/reconstructed reference. Tongue and Quill full PDF retrieval was unavailable; official-index-only does not verify the current full edition.", "ei-psa-qc-sources");
+    sourceLines().forEach(function (line) { append(results, "p", line, "ei-psa-qc-sources"); });
+    lines = lines.concat(["", "What was checked:"], coverageLines(result.coverage), ["Sources (local TO extract; TQ full text/current edition unverified):"]);
+    lines = lines.concat(sourceLines(), ["", result.limitation]);
+    retained = { ticket: ticket, snapshot: snapshot, text: lines.join("\n"), number: label };
+    results.hidden = false; busy = false;
+    status.textContent = "Saved facts checked. Review the findings and source limitations; no review, signature or approval was recorded.";
+    buttons();
+  }
+  function run() {
+    if (!eligible() || busy) return;
+    invalidate("Reading saved survey and document evidence…");
+    var ticket = { epoch: epoch, path: current().path }; busy = true; buttons();
+    capture(ticket).then(function (snapshot) {
+      if (!alive(ticket)) return;
+      return verify(ticket, snapshot).then(function (valid) {
+        if (!alive(ticket)) return;
+        if (!valid) { invalidate("Saved sources changed during the check. Run it again; your draft remains in the editor."); return; }
+        publish(ticket, snapshot);
+      });
+    }).catch(function (error) {
+      if (alive(ticket)) invalidate("The saved check could not finish. " + boundedError(error) + " Save your survey and retry; your draft is retained.");
+    });
+  }
+  function download() {
+    var saved = retained;
+    if (!saved || busy || !alive(saved.ticket)) return;
+    busy = true; buttons();
+    verify(saved.ticket, saved.snapshot).then(function (valid) {
+      if (!alive(saved.ticket) || retained !== saved) return;
+      if (!valid) { invalidate("Saved sources changed. Run the check again before downloading working notes."); return; }
+      var url = URL.createObjectURL(new Blob([saved.text], { type: "text/plain;charset=utf-8" }));
+      var link = document.createElement("a"); link.href = url;
+      link.download = saved.number.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 80) + " PSA QC working notes.txt";
+      link.click(); setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+      busy = false; status.textContent = "QC working notes download requested. No project review or approval was recorded."; buttons();
+    }).catch(function (error) {
+      if (alive(saved.ticket)) invalidate("Could not verify saved sources for the notes. " + boundedError(error));
+    });
+  }
+  function init() {
+    if (initialized) return;
+    initialized = true; runButton = element("ei-psa-qc-run"); downloadButton = element("ei-psa-qc-download");
+    status = element("ei-psa-qc-status"); results = element("ei-psa-qc-results");
+    runButton.addEventListener("click", run); downloadButton.addEventListener("click", download);
+    function edited() { invalidate("Local inputs changed. Save your survey and run the saved check again. Your draft is retained."); }
+    element("view-psa").addEventListener("input", edited, true);
+    element("view-psa").addEventListener("change", edited, true);
+    EI.project.onChange(function () { invalidate("Project changed. Run a new saved check for this project."); });
+    EI.router.onChange(function () { invalidate("Run the check after saving your survey and generating the document."); });
+    buttons();
+  }
+  EI.psaQc = { init: init };
+})(window.EI);
 
 /* The Assistant: a floating launcher and docked panel available on every
    view (a website-style widget, not a router view -- the panel overlays
@@ -51077,7 +51487,7 @@ window.EI = window.EI || {};
     EI.startup.markOpened();
     EI.router.show("home");
   }
-  EI.profile.init().then(function () { if (EI.theme) EI.theme.adopt(); if (EI.history) EI.history.init(); if (EI.locks) EI.locks.init(); if (EI.project) EI.project.init(); if (EI.psa) EI.psa.init(); if (EI.lom) EI.lom.init(); if (EI.catalog) EI.catalog.init(); if (EI.assist) EI.assist.init(); if (EI.overview) EI.overview.init(); if (EI.roster) EI.roster.init(); if (EI.team) EI.team.init(); if (EI.brief) EI.brief.init(); if (EI.notes) EI.notes.init(); if (EI.vehicles && EI.vehicles.init) EI.vehicles.init(); if (EI.forms) EI.forms.init(); if (EI.afto749) EI.afto749.init(); if (EI.dailyLog) EI.dailyLog.init(); if (EI.projectReview) EI.projectReview.init(); if (EI.afto752) EI.afto752.init(); if (EI.afto754) EI.afto754.init(); if (EI.demo) EI.demo.init(); if (EI.presence) EI.presence.init(); });
+  EI.profile.init().then(function () { if (EI.theme) EI.theme.adopt(); if (EI.history) EI.history.init(); if (EI.locks) EI.locks.init(); if (EI.project) EI.project.init(); if (EI.psa) EI.psa.init(); if (EI.psaQc) EI.psaQc.init(); if (EI.lom) EI.lom.init(); if (EI.catalog) EI.catalog.init(); if (EI.assist) EI.assist.init(); if (EI.overview) EI.overview.init(); if (EI.roster) EI.roster.init(); if (EI.team) EI.team.init(); if (EI.brief) EI.brief.init(); if (EI.notes) EI.notes.init(); if (EI.vehicles && EI.vehicles.init) EI.vehicles.init(); if (EI.forms) EI.forms.init(); if (EI.afto749) EI.afto749.init(); if (EI.dailyLog) EI.dailyLog.init(); if (EI.projectReview) EI.projectReview.init(); if (EI.afto752) EI.afto752.init(); if (EI.afto754) EI.afto754.init(); if (EI.demo) EI.demo.init(); if (EI.presence) EI.presence.init(); });
 })(window.EI);
 </script>
 <script>(function () {
