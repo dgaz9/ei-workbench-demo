@@ -1,0 +1,26 @@
+{
+  "schema": "ei-afto749-template/1",
+  "template": {
+    "file": "AFTO749-20200805-cover-sheet.pdf",
+    "sha256": "f39ad91f2dd7896e43d788c62bf68a5aeb729bfefca7349febe58443642f4abd",
+    "title": "AFTO FORM 749, 20200805 (user-supplied)",
+    "official_claim": "none",
+    "notes": "User-supplied 20200805 blank. Not asserted to be the latest official revision."
+  },
+  "field_map": {
+    "sha256": "4be634d3219ba4f6695c52eb98130a37063ae00dce1d3fa820c40c7be392670b",
+    "slot_count": 23,
+    "signatures_excluded": true
+  },
+  "pdfjs": {
+    "package": "pdfjs-dist",
+    "version": "5.6.205",
+    "module": "pdf.min.mjs",
+    "module_sha256": "0d29c4871eff0b72f3896825f2673ddf7dfbccf815a7095a5d14f5aa68fab0e5",
+    "worker": "pdf.worker.min.mjs",
+    "worker_sha256": "7fc442c268d107d656755252cf38c422a88e825b7f0caaac6a5f58364dff4179",
+    "license": "LICENSE",
+    "license_sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594",
+    "license_spdx": "Apache-2.0"
+  }
+}

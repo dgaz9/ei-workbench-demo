@@ -1,0 +1,9 @@
+{
+  "template": {
+    "file": "AFTO752-20200805.pdf",
+    "sha256": "96b938941718c620206f45cf1cd83f2dcbf020552f7692ca38ba86a9c2519bbf",
+    "edition": "AFTO Form 752, 20200805",
+    "source": "User supplied original main_afto-form-752-engineering-installation-project-report.pdf"
+  },
+  "field_map_sha256": "e7b78024af57529fecd981d999dc0bb1c0e2b89960909ce123c2522b64fd3dde"
+}

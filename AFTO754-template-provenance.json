@@ -1,0 +1,19 @@
+{
+  "template": {
+    "file": "AFTO754-20200806.pdf",
+    "sha256": "3d2eb1b688e7657d6f72b2e4229ee10c9a1dae0579d5590db0424a929aa73a5c",
+    "edition": "AFTO Form 754, 20200806",
+    "source": "User supplied original main_afto-form-754-ei-quality-assurance-evaluation-record.pdf",
+    "preservation": "Byte-identical original; no generated output"
+  },
+  "mappingSha256": "ea77ff3cf5e913a760e1b94661dbfceefda05f1af54218ef6ea01d26eb17a123",
+  "evidence": {
+    "direct": "Pinned PDF.js runtime mapping: 225 inputs and 8 signature wrappers",
+    "auditOnly": "2 hidden pagination controls and date pictures from prior diagnostic XML; no production decryption fallback"
+  },
+  "limits": [
+    "No field save or viewer roundtrip tested",
+    "No text/date/zero rendering tested",
+    "No signatures or certification produced"
+  ]
+}
